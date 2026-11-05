@@ -291,8 +291,5 @@ docker run -d --name n8n --restart unless-stopped \
 
 ---
 
-## 👤 Autor
 
-**TODO: tu nombre**
 Quito, Ecuador
-[LinkedIn](https://www.linkedin.com/) · [GitHub](https://github.com/)
