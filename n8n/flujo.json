@@ -1,0 +1,437 @@
+{
+  "name": "Registro de Gastos",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.5,
+      "position": [
+        -144,
+        -16
+      ],
+      "id": "4f072958-345c-4e3f-9343-758a7d5fdeab",
+      "name": "Telegram Trigger",
+      "webhookId": "7855cfc2-f3a6-49eb-9061-9efc7527197e",
+      "credentials": {
+        "telegramApi": {
+          "id": "Jgb3qyBN3uQxGwzj",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "=   ✅ Gasto guardado\n   💵 Monto: ${{ $json.monto }}\n   🏷️ Categoría: {{ $json.categoria }}\n   📝 Descripción: {{ $json.descripcion }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1328,
+        -320
+      ],
+      "id": "167bc601-adfe-46b0-9135-f3a59c1529e2",
+      "name": "Send a text message",
+      "webhookId": "090d7abb-f29e-4301-b192-906c9f88b767",
+      "credentials": {
+        "telegramApi": {
+          "id": "Jgb3qyBN3uQxGwzj",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH nuevo AS (\n  INSERT INTO gastos (categoria_id, monto, descripcion)\n  SELECT id, $1::numeric, $2\n  FROM categorias\n  WHERE nombre = $3\n  RETURNING monto, descripcion, categoria_id\n)\nSELECT n.monto, n.descripcion, c.nombre AS categoria\nFROM nuevo n\nJOIN categorias c ON c.id = n.categoria_id;",
+        "options": {
+          "queryReplacement": "={{ [$json.monto, $json.descripcion, $json.categoria] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        1120,
+        -320
+      ],
+      "id": "33a616c7-12b7-4463-b969-8d854e97d412",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "OgDTu6TfTfXwHxYc",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemini-3.1-flash-lite",
+          "mode": "list",
+          "cachedResultName": "Gemini 3.1 Flash Lite"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=Eres un extractor de datos. Recibes un mensaje de gasto en español y\nrespondes SOLO con un JSON válido, sin texto adicional ni markdown:\n{\"monto\": number, \"descripcion\": string, \"categoria\": string}\nCategorías permitidas: Comida, Transporte, Estudios, Ocio, Otros.\nSi el mensaje no describe un gasto, responde: {\"error\": \"no_es_gasto\"}\n\nMensaje: {{ $('Telegram Trigger').item.json.message.text }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        416,
+        -304
+      ],
+      "id": "c85725c1-e573-4826-8501-028670976fb8",
+      "name": "Message a model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "gmZlOKwpHk64H8BH",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const raw = $json.content?.parts?.[0]?.text ?? $json.text ?? $json.output ?? '';\nconst chatId = $('Telegram Trigger').item.json.message.chat.id;\nconst CATEGORIAS = ['Comida', 'Transporte', 'Estudios', 'Ocio', 'Otros'];\n\nconst fail = (motivo) => ({ json: { ok: false, chat_id: chatId, motivo } });\n\nlet data;\ntry {\n  data = JSON.parse(String(raw).replace(/```json|```/g, '').trim());\n} catch (e) {\n  return fail('La IA no devolvió un JSON válido');\n}\n\nif (!data || typeof data !== 'object') return fail('Respuesta inesperada de la IA');\nif (data.error) return fail('No parece un gasto');\nlet monto = typeof data.monto === 'string'\n  ? parseFloat(data.monto.replace(/[^0-9.,-]/g, '').replace(',', '.'))\n  : Number(data.monto);\n\nif (!Number.isFinite(monto) || monto <= 0 || monto > 100000) {\n  return fail('Monto inválido');\n}\nmonto = Math.round(monto * 100) / 100;\n\nconst texto = $('Telegram Trigger').item.json.message.text ?? '';\n\n// Rechaza si el mensaje original trae un número con signo negativo\nif (/(^|\\s)-\\s*\\d/.test(texto)) return fail('Monto negativo en el mensaje');\n\n// El monto que devolvió la IA debe aparecer realmente en el mensaje\nconst numeros = (texto.match(/\\d+(?:[.,]\\d+)?/g) ?? [])\n  .map(n => parseFloat(n.replace(',', '.')));\nif (!numeros.some(n => Math.abs(n - monto) < 0.005)) {\n  return fail('El monto no aparece en el mensaje');\n}\n\nconst descripcion = String(data.descripcion ?? '').trim().slice(0, 200);\nif (!descripcion) return fail('Falta la descripción');\n\nconst categoria = CATEGORIAS.includes(data.categoria) ? data.categoria : 'Otros';\n\nreturn { json: { ok: true, chat_id: chatId, monto, descripcion, categoria } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        704,
+        -304
+      ],
+      "id": "63f8c488-abb6-46cf-bd97-8e92ed845488",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "f0ee1a75-cb71-4c56-9e20-92d1726c362d",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        896,
+        -304
+      ],
+      "id": "019a28b8-b6cd-4f18-a63d-b29782f37182",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "   ⚠️ No pude entender ese gasto. Prueba con algo como: \"almuerzo 3.50\"",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        -176
+      ],
+      "id": "7336c48a-15b9-4016-a377-0c51decf4d5d",
+      "name": "Send a text message1",
+      "webhookId": "af456b69-854d-480e-b70c-9ac2185295bb",
+      "credentials": {
+        "telegramApi": {
+          "id": "Jgb3qyBN3uQxGwzj",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "c923dcaa-a6b0-4c7b-8ac9-f608c4485330",
+              "leftValue": "={{ $json.message.text ?? '' }}",
+              "rightValue": "=/resumen",
+              "operator": {
+                "type": "string",
+                "operation": "startsWith"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        272,
+        -32
+      ],
+      "id": "621dda18-58ad-4ec1-8d22-bf998eea6e29",
+      "name": "If1"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.nombre AS categoria,\n       SUM(g.monto) AS total\nFROM gastos g\nJOIN categorias c ON c.id = g.categoria_id\nWHERE g.fecha_gasto >= date_trunc('month', now() AT TIME ZONE 'America/Guayaquil')\n                       AT TIME ZONE 'America/Guayaquil'\nGROUP BY c.nombre\nORDER BY total DESC;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        512,
+        -48
+      ],
+      "id": "3a02aa5e-9845-478e-982f-4cb3d850fa37",
+      "name": "Execute a SQL query1",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "OgDTu6TfTfXwHxYc",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const filas = $input.all()\n  .map(i => i.json)\n  .filter(f => f.categoria);\n\nif (filas.length === 0) {\n  return [{ json: { text: 'No hay gastos registrados este mes.' } }];\n}\n\nconst total = filas.reduce((s, f) => s + Number(f.total), 0);\nconst lineas = filas.map(f => `• ${f.categoria}: $${Number(f.total).toFixed(2)}`);\n\nconst text = `📊 Resumen del mes\\n${lineas.join('\\n')}\\n\\n💰 Total: $${total.toFixed(2)}`;\n\nreturn [{ json: { text } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        704,
+        -48
+      ],
+      "id": "447714d0-9210-4c64-9597-a238c542495d",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        896,
+        -48
+      ],
+      "id": "380ea8f5-8e10-4a51-b812-c76a49b160b3",
+      "name": "Send a text message2",
+      "webhookId": "b9b72869-64bf-4430-a9c1-b4cbe46eeb95",
+      "credentials": {
+        "telegramApi": {
+          "id": "Jgb3qyBN3uQxGwzj",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "3fe6c945-d65a-4f0e-87b0-c1f4a869e65d",
+              "leftValue": "={{ $json.message.chat.id }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        48,
+        -16
+      ],
+      "id": "693c49c0-8eea-4d83-9be6-18d4ebe826fa",
+      "name": "only me"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "only me",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a text message": {
+      "main": [
+        []
+      ]
+    },
+    "Message a model": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send a text message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If1": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Message a model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Send a text message2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "only me": {
+      "main": [
+        [
+          {
+            "node": "If1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "21161251-4842-441d-974c-fd3c2287b4d4",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "5ef4ae53d93c5ed6c30940aa88f4b5e510c3cc846b4be668c2148133c29198fc"
+  },
+  "nodeGroups": [],
+  "id": "CaZv8SkWifv7h9ev",
+  "tags": []
+}
